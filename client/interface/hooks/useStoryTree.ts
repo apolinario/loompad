@@ -58,24 +58,6 @@ export function useStoryTree(params: StoryParams, onModelChange?: (model: ModelI
     []
   );
 
-  const getOptionsAtDepth = useCallback(
-    (depth: number): StoryNode[] => {
-      if (depth === 0) return storyTree.root.continuations || [];
-
-      let currentNode = storyTree.root;
-      for (let i = 0; i < depth - 1; i++) {
-        if (!currentNode.continuations?.[selectedOptions[i]]) return [];
-        currentNode = currentNode.continuations[selectedOptions[i]];
-      }
-
-      return (
-        currentNode.continuations?.[selectedOptions[depth - 1]]
-          ?.continuations || []
-      );
-    },
-    [storyTree, selectedOptions]
-  );
-
   const getCurrentPath = useCallback((): StoryNode[] => {
     const path = [storyTree.root];
     let currentNode = storyTree.root;
@@ -99,6 +81,18 @@ export function useStoryTree(params: StoryParams, onModelChange?: (model: ModelI
 
     return path;
   }, [storyTree, selectedOptions, getLastSelectedIndex]);
+
+  // --- REFACTORED/FIXED FUNCTION ---
+  // This is much simpler and more robust. It gets the options for the *next* level.
+  const getOptionsAtDepth = useCallback(
+    (depth: number): StoryNode[] => {
+      const path = getCurrentPath();
+      const parentNode = path[depth];
+      return parentNode?.continuations || [];
+    },
+    [getCurrentPath]
+  );
+
 
   // Helper to update the lastSelectedIndex in the tree
   const updateLastSelectedIndex = useCallback(
@@ -253,7 +247,12 @@ export function useStoryTree(params: StoryParams, onModelChange?: (model: ModelI
 
       switch (key) {
         case "ArrowUp":
-          setCurrentDepth((prev) => Math.max(0, prev - 1));
+          if (currentDepth > 0) {
+            const newDepth = currentDepth - 1;
+            setCurrentDepth(newDepth);
+            // Truncate selected options when moving up, as deeper selections are no longer valid.
+            setSelectedOptions((opts) => opts.slice(0, newDepth + 1));
+          }
           break;
         case "ArrowDown":
           if (currentDepth < currentPath.length - 1) {
@@ -369,6 +368,9 @@ export function useStoryTree(params: StoryParams, onModelChange?: (model: ModelI
               // For new children, stay at current depth
               // The children will be visible but not selected
               console.log("Generated new children, staying at current depth");
+              // Prune selectedOptions to the current depth. This is crucial because we are
+              // creating a new branch from this point, invalidating any deeper selections.
+              setSelectedOptions(prev => prev.slice(0, currentDepth + 1));
             }
 
             // Update tree last to ensure all state is consistent
@@ -377,6 +379,46 @@ export function useStoryTree(params: StoryParams, onModelChange?: (model: ModelI
               ...prev,
               [currentTreeKey]: updatedTree,
             }));
+
+            // --- START of new logging ---
+            if (!hasExistingContinuations) {
+              // Manually trace the path in the NEW tree to find the parent node
+              // because state updates are async and helper functions use the OLD state.
+              let parentNodeInUpdatedTree: StoryNode | null = updatedTree.root;
+              const pathToParent = currentPath.slice(0, currentDepth + 1);
+
+              for (let i = 1; i < pathToParent.length; i++) {
+                const pathNode = pathToParent[i];
+                const continuationIndex =
+                  parentNodeInUpdatedTree!.continuations?.findIndex(
+                    (node) => node.id === pathNode.id
+                  ) ?? -1;
+                if (continuationIndex !== -1) {
+                  parentNodeInUpdatedTree =
+                    parentNodeInUpdatedTree!.continuations![continuationIndex];
+                } else {
+                  console.log(
+                    `DEBUG: Could not find node ${pathNode.id} in updatedTree during logging.`
+                  );
+                  parentNodeInUpdatedTree = null;
+                  break;
+                }
+              }
+
+              if (parentNodeInUpdatedTree) {
+                const childrenCount =
+                  parentNodeInUpdatedTree.continuations?.length ?? 0;
+                console.log(
+                  `DEBUG: After generation, node at depth ${currentDepth} (ID: ${parentNodeInUpdatedTree.id}) in updatedTree now has ${childrenCount} children.`,
+                  {
+                    children: parentNodeInUpdatedTree.continuations?.map(
+                      (c) => ({ id: c.id, text: c.text.slice(0, 20) })
+                    ),
+                  }
+                );
+              }
+            }
+            // --- END of new logging ---
           } catch (e) {
             console.error("Generation failed:", e);
           } finally {
